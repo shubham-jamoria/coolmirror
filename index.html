@@ -209,19 +209,15 @@ a.ghost{display:block;text-align:center;text-decoration:none;color:inherit}
    <button class="cta" type="submit">Continue to payment</button>
   </form>
   <div class="done" id="done">
-   <h3>Pay with UPI</h3>
+   <h3 id="doneTitle">Processing…</h3>
    <p id="dmsg"></p>
-   <a class="cta" id="upi">Pay with UPI app</a>
-   <div id="qr" style="display:flex;justify-content:center;margin:16px 0"></div>
-   <p id="upid" style="text-align:center;font-size:14px;margin:0 0 6px"></p>
-   <button class="ghost" id="copy" type="button">Copy UPI ID</button>
-   <a class="ghost" id="wa" target="_blank" rel="noopener">I've paid, send order on WhatsApp</a>
+   <button class="ghost" id="retry" type="button" style="display:none">Try payment again</button>
   </div>
  </div>
 </dialog>
 <div class="toast" id="toast" role="status"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script>
 const $=s=>document.querySelector(s),hero=$('.hero'),refl=$('#refl'),sheen=$('#sheen');
 const walls=['#ece7e2','#e3e9e1','#f1e0d2'];
@@ -238,10 +234,8 @@ if(!matchMedia('(prefers-reduced-motion:reduce)').matches){
     sheen.setAttribute('transform',`translate(${(x*300+150).toFixed(1)} 0)`);
   });
 }
-const SELLER='918889964694'; // WhatsApp number that receives orders (91 = India)
-const UPI_ID='shubhamjamoria@ybl',PAYEE='Diet Coke Mirror'; // UPI ID that receives payments
 const PRICE=3499,dlg=$('#dlg'),fmt=n=>'₹'+n.toLocaleString('en-IN');
-let q=1,t,msg='';
+let q=1,t,lastOrder=null;
 const toast=m=>{const el=$('#toast');el.textContent=m;el.classList.add('on');clearTimeout(t);t=setTimeout(()=>el.classList.remove('on'),2200)};
 const upd=()=>{$('#q').textContent=q;$('#tot').textContent=fmt(q*PRICE)};
 $('#minus').onclick=()=>{q=Math.max(1,q-1);upd()};
@@ -249,25 +243,63 @@ $('#plus').onclick=()=>{q++;upd()};
 document.querySelectorAll('[data-buy]').forEach(b=>b.onclick=()=>{$('#form').style.display='';$('#done').style.display='none';upd();dlg.showModal()});
 $('#close').onclick=()=>dlg.close();
 dlg.addEventListener('click',e=>{if(e.target===dlg)dlg.close()});
-$('#form').onsubmit=e=>{
-  e.preventDefault();
-  const id='DCM-'+Date.now().toString(36).toUpperCase().slice(-6),total=q*PRICE;
-  msg=`New order ${id}\nDiet Coke mirror x ${q} = ${fmt(total)}\nPayment: UPI (paid, screenshot to follow)\nName: ${$('#nm').value}\nPhone: ${$('#ph').value}\nAddress: ${$('#ad').value}`;
-  $('#wa').href=`https://wa.me/${SELLER}?text=${encodeURIComponent(msg)}`;
-  const qr=$('#qr');qr.innerHTML='';
-  if(UPI_ID){
-    const link=`upi://pay?pa=${encodeURIComponent(UPI_ID)}&pn=${encodeURIComponent(PAYEE)}&am=${total}.00&cu=INR&tn=${id}`;
-    $('#dmsg').textContent=`Order ${id}: ${q} mirror${q>1?'s':''}, ${fmt(total)}. Pay with your UPI app, or scan the code from another phone. Then send the order on WhatsApp with your payment screenshot.`;
-    $('#upi').href=link;$('#upi').textContent=`Pay ${fmt(total)} with UPI app`;$('#upi').style.display='';
-    $('#upid').textContent=`UPI ID: ${UPI_ID}`;$('#copy').style.display='';
-    if(window.QRCode)new QRCode(qr,{text:link,width:180,height:180});
-  }else{
-    $('#dmsg').textContent='UPI payment is not set up on this page yet. The seller needs to add their UPI ID.';
-    $('#upi').style.display='none';$('#copy').style.display='none';$('#upid').textContent='';
-  }
+
+function showDone(title,msg,retry){
+  $('#doneTitle').textContent=title;$('#dmsg').textContent=msg;
+  $('#retry').style.display=retry?'':'none';
   $('#form').style.display='none';$('#done').style.display='block';
-};
-$('#copy').onclick=async()=>{try{await navigator.clipboard.writeText(UPI_ID);toast('UPI ID copied')}catch{toast('Copy failed. Select the UPI ID and copy it manually.')}};
+}
+
+async function startPayment(){
+  const name=$('#nm').value,phone=$('#ph').value,address=$('#ad').value;
+  showDone('Contacting payment server…','One moment.',false);
+  let order;
+  try{
+    const r=await fetch('/api/create-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({qty:q,name,phone,address})});
+    if(!r.ok)throw new Error('server');
+    order=await r.json();
+  }catch(err){
+    showDone('Could not start payment','Something went wrong reaching the payment server. Please try again.',true);
+    return;
+  }
+  lastOrder=order;
+  const rzp=new Razorpay({
+    key:order.keyId,
+    amount:order.amount,
+    currency:order.currency,
+    order_id:order.orderId,
+    name:'Diet Coke Mirror',
+    description:`${q} mirror${q>1?'s':''}`,
+    prefill:{name,contact:phone},
+    theme:{color:'#e01e2b'},
+    handler:async function(resp){
+      showDone('Confirming payment…','One moment.',false);
+      try{
+        const v=await fetch('/api/verify-payment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          razorpay_order_id:resp.razorpay_order_id,
+          razorpay_payment_id:resp.razorpay_payment_id,
+          razorpay_signature:resp.razorpay_signature
+        })});
+        const vj=await v.json();
+        if(vj.verified){
+          showDone('Payment received','Your order is confirmed. We\\'ll reach out on your phone number with delivery details.',false);
+        }else{
+          showDone('Payment could not be verified','If money was deducted, contact us with your payment ID: '+resp.razorpay_payment_id,true);
+        }
+      }catch(err){
+        showDone('Payment could not be verified','If money was deducted, contact us with your payment ID: '+resp.razorpay_payment_id,true);
+      }
+    },
+    modal:{ondismiss:function(){dlg.close()}}
+  });
+  rzp.on('payment.failed',function(resp){
+    showDone('Payment failed',resp.error && resp.error.description ? resp.error.description : 'The payment did not go through. Please try again.',true);
+  });
+  rzp.open();
+}
+
+$('#form').onsubmit=e=>{e.preventDefault();startPayment()};
+$('#retry').onclick=()=>{$('#form').style.display='';$('#done').style.display='none'};
 </script>
 </body>
 </html>
