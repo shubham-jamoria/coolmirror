@@ -1,0 +1,9 @@
+{
+  "name": "diet-coke-mirror",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "razorpay": "^2.9.4",
+    "nodemailer": "^6.9.14"
+  }
+}
